@@ -2,101 +2,83 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-st.set_page_config(page_title="VAPA Overload Calculator", page_icon="📊")
+st.title("Batch Spreadsheet Processor")
 
-st.title("VAPA Overload Calculator")
+uploaded_files = st.file_uploader("Upload Excel files", accept_multiple_files=True, type=["xlsx"])
 
-uploaded_file = st.file_uploader("Upload your Excel file", type=['xlsx', 'xls'])
+if uploaded_files:
+    final_results = []
+    for file in uploaded_files:
+        df = pd.read_excel(file)
 
-if uploaded_file is not None:
-    if 'vapa overload' not in uploaded_file.name.lower():
-        st.error("File name must contain 'vapa overload'")
-    else:
-        with st.spinner('Processing file...'):
-            # Read the Excel file
-            df = pd.read_excel(uploaded_file)
-            
-            # Step 1: Delete columns C, G-L
-            columns_to_delete = ['C', 'G', 'H', 'I', 'J', 'K', 'L']
-            df = df.drop(columns=columns_to_delete, errors='ignore')
+        cols_to_drop = ["C", "G", "H", "I", "J", "K", "L"]
+        df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
 
-            # Step 2: Delete rows not containing specific words
-            keywords = ['MUSIC', 'PHYS ED', 'ART', 'CREATIVE']
-            df = df[df['Course Title'].str.contains('|'.join(keywords), case=False, na=False)]
+        df = df[df["Course Title"].str.contains("MUSIC|PHYS ED|ART|CREATIVE", case=False)]
+        df = df[df["Total Students"] != 0]
 
-            # Step 3: Delete rows where total students equals 0
-            df = df[df['Total Students'] != 0]
+        df["Base Students"] = 0
+        df["Max Students"] = 0
+        df["Total Overload"] = 0
+        df["Base Overload"] = 0
+        df["Max Overload"] = 0
 
-            # Step 4: Add new columns
-            df['Base Students'] = 0
-            df['Max Students'] = 0
-            df['Total Overload'] = 0
-            df['Base Overload'] = 0
-            df['Max Overload'] = 0
+        conditions = [
+            df["Course Title"].str.contains("1|2|3", case=False),
+            df["Course Title"].str.contains("4|5", case=False),
+            df["Course Title"].str.contains("KINDER|K", case=False)
+        ]
+        base_values = [23, 26, 22]
+        max_values = [25, 28, 24]
 
-            # Step 5: Assign Base Students and Max Students based on conditions
-            for index, row in df.iterrows():
-                title = row['Course Title'].upper()
-                if any(x in title for x in ['1', '2', '3']):
-                    df.at[index, 'Base Students'] = 23
-                    df.at[index, 'Max Students'] = 25
-                elif any(x in title for x in ['4', '5']):
-                    df.at[index, 'Base Students'] = 26
-                    df.at[index, 'Max Students'] = 28
-                elif any(x in title for x in ['KINDER', 'K']):
-                    df.at[index, 'Base Students'] = 22
-                    df.at[index, 'Max Students'] = 24
+        for cond, b_val, m_val in zip(conditions, base_values, max_values):
+            df.loc[cond, "Base Students"] = b_val
+            df.loc[cond, "Max Students"] = m_val
 
-            # Step 6: Calculate Total Overload
-            df['Total Overload'] = df['Total Students'] - df['Base Students']
-            df['Total Overload'] = df['Total Overload'].apply(lambda x: max(0, x))
+        df["Total Overload"] = df.apply(lambda row: max(0, row["Total Students"] - row["Base Students"]), axis=1)
+        df["Max Overload"] = df.apply(lambda row: max(0, row["Total Students"] - row["Max Students"]) if row["Total Overload"] > 2 else 0, axis=1)
+        df["Base Overload"] = df.apply(lambda row: row["Total Overload"] if row["Total Overload"] <= 2 else row["Total Overload"] - row["Max Overload"], axis=1)
 
-            # Step 7: Calculate Max Overload
-            df['Max Overload'] = df['Total Students'] - df['Max Students']
-            df['Max Overload'] = df['Max Overload'].apply(lambda x: max(0, x))
+        df.sort_values("Staff Name", inplace=True)
 
-            # Step 8: Calculate Base Overload
-            df['Base Overload'] = df.apply(lambda row: row['Total Overload'] if row['Total Overload'] <= 2 else row['Total Overload'] - row['Max Overload'], axis=1)
+        new_rows = []
+        for staff_name, group in df.groupby("Staff Name"):
+            total_base = group["Base Overload"].sum()
+            total_max = group["Max Overload"].sum()
+            new_rows.append({"Staff Name": staff_name, "Base Overload": total_base, "Max Overload": total_max})
 
-            # Step 9: Sort by Staff Name
-            df = df.sort_values(by='Staff Name')
+        blank_rows = pd.DataFrame(new_rows)
 
-            # Step 10: Add blank rows and calculate totals
-            results = []
-            for staff_name, group in df.groupby('Staff Name'):
-                results.append(group)
-                blank_row = pd.Series('', index=group.columns)
-                blank_row['Staff Name'] = staff_name
-                blank_row['Base Overload'] = group['Base Overload'].sum()
-                blank_row['Max Overload'] = group['Max Overload'].sum()
-                results.append(blank_row)
+        combined = []
+        for staff_name, group in df.groupby("Staff Name"):
+            combined.append(group)
+            combined.append(blank_rows[blank_rows["Staff Name"] == staff_name])
+        final_df = pd.concat(combined, ignore_index=True)
 
-            df = pd.concat(results, ignore_index=True)
+        final_df["Base Overload Pay"] = final_df["Base Overload"]
+        final_df["Max Overload Pay"] = final_df["Max Overload"] * 1.5
 
-            # Step 11: Add pay columns (keep as numbers for calculations)
-            df['Base Overload Pay'] = df['Base Overload']
-            df['Max Overload Pay'] = df['Max Overload'] * 1.5
+        def calc_currency(x):
+            return f"${x:.2f}"
 
-            # Step 12: Calculate Total Monthly Overload first (while values are still numeric)
-            df['Total Monthly Overload'] = (df['Base Overload Pay'] + df['Max Overload Pay']) * 30 / 8
+        final_df["Base Overload Pay"] = final_df["Base Overload Pay"].apply(calc_currency)
+        final_df["Max Overload Pay"] = final_df["Max Overload Pay"].apply(calc_currency)
 
-            # Format all monetary columns as currency after calculations are complete
-            for col in ['Base Overload Pay', 'Max Overload Pay', 'Total Monthly Overload']:
-                df[col] = df[col].apply(lambda x: f"${x:.2f}" if pd.notnull(x) and x != '' else x)
+        def calc_total_monthly(row):
+            base_val = float(row["Base Overload Pay"].replace("$",""))
+            max_val = float(row["Max Overload Pay"].replace("$",""))
+            total = base_val + max_val
+            monthly = (total * 30) / 8
+            return f"${monthly:.2f}"
 
-            # Create download button
-            output = BytesIO()
-            df.to_excel(output, index=False)
-            output.seek(0)
-            
-            st.success('File processed successfully!')
-            st.download_button(
-                label="Download Processed File",
-                data=output,
-                file_name=f"Processed_{uploaded_file.name}",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-            # Show preview of processed data
-            st.subheader("Preview of Processed Data")
-            st.dataframe(df)
+        final_df["Total Monthly Overload"] = final_df.apply(calc_total_monthly, axis=1)
+
+        final_results.append(final_df)
+
+    output = pd.concat(final_results, ignore_index=True)
+    st.dataframe(output)
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer) as writer:
+        output.to_excel(writer, index=False)
+    st.download_button("Download Results", data=buffer.getvalue(), file_name="processed_results.xlsx")
